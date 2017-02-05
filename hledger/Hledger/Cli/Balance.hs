@@ -245,9 +245,11 @@ module Hledger.Cli.Balance (
  ,tests_Hledger_Cli_Balance
 ) where
 
+import Data.Bifunctor
 import Data.List (intercalate)
 import Data.Maybe
 import Data.Monoid
+import Data.Time (Day)
 -- import Data.Text (Text)
 import qualified Data.Text as T
 import System.Console.CmdArgs.Explicit as C
@@ -293,39 +295,44 @@ balancemode = (defCommandMode $ ["balance"] ++ aliases) { -- also accept but don
 balance :: CliOpts -> Journal -> IO ()
 balance opts@CliOpts{reportopts_=ropts} j = do
   d <- getCurrentDay
-  case lineFormatFromOpts ropts of
-    Left err -> error' $ unlines [err]
-    Right _ -> do
-      let format   = outputFormatFromOpts opts
-          interval = interval_ ropts
-          baltype  = balancetype_ ropts
-      mvaluedate <- reportEndDate j ropts
-      -- shenanigans: use single/multiBalanceReport when we must,
-      -- ie when there's a report interval, or --historical or -- cumulative.
-      -- Otherwise prefer the older balanceReport since it can elide boring parents.
-      case interval of
-        NoInterval -> do
-          let report
-                -- For --historical/--cumulative, we must use multiBalanceReport.
-                -- (This forces --no-elide.)
-                | balancetype_ ropts `elem` [HistoricalBalance, CumulativeChange]
-                  = let ropts' | flat_ ropts = ropts
-                               | otherwise   = ropts{accountlistmode_=ALTree}
-                    in singleBalanceReport ropts' (queryFromOpts d ropts) j
-                | otherwise = balanceReport ropts (queryFromOpts d ropts) j
-              render = case format of
-                "csv" -> \ropts r -> (++ "\n") $ printCSV $ balanceReportAsCsv ropts r
-                _     -> balanceReportAsText
-          writeOutput opts $ render ropts report
-        _ -> do
-          let report = multiBalanceReport ropts (queryFromOpts d ropts) j
-              render = case format of
-                "csv" -> \ropts r -> (++ "\n") $ printCSV $ multiBalanceReportAsCsv ropts r
-                _     -> case baltype of
-                  PeriodChange     -> periodChangeReportAsText
-                  CumulativeChange -> cumulativeChangeReportAsText
-                  HistoricalBalance -> historicalBalanceReportAsText
-          writeOutput opts $ render ropts report
+  mvaluedate <- reportEndDate j ropts
+  case balance' opts d mvaluedate j of
+    Left err       -> error' err
+    Right (out, _) -> writeOutput opts out
+
+balance' :: CliOpts -> Day -> Maybe Day -> Journal -> Either String (String, ([MixedAmount], MixedAmount))
+balance' opts@CliOpts{reportopts_=ropts} d mvaluedate j = do
+  _ <- lineFormatFromOpts ropts
+  let format   = outputFormatFromOpts opts
+      interval = interval_ ropts
+      baltype  = balancetype_ ropts
+  -- shenanigans: use single/multiBalanceReport when we must,
+  -- ie when there's a report interval, or --historical or -- cumulative.
+  -- Otherwise prefer the older balanceReport since it can elide boring parents.
+  case interval of
+    NoInterval -> do
+      let report@(_, tot)
+            -- For --historical/--cumulative, we must use multiBalanceReport.
+            -- (This forces --no-elide.)
+            | balancetype_ ropts `elem` [HistoricalBalance, CumulativeChange]
+              = let ropts' | flat_ ropts = ropts
+                           | otherwise   = ropts{accountlistmode_=ALTree}
+                in singleBalanceReport ropts' (queryFromOpts d ropts) j
+            | otherwise = balanceReport ropts (queryFromOpts d ropts) j
+          render = case format of
+            "csv" -> \ropts r -> (++ "\n") $ printCSV $ balanceReportAsCsv ropts r
+            _     -> balanceReportAsText
+      return $ (render ropts report, ([tot], tot))
+    _ -> do
+      let report@(MultiBalanceReport (_, _, (tots, tot, _)))
+                 = multiBalanceReport ropts (queryFromOpts d ropts) j
+          render = case format of
+            "csv" -> \ropts r -> (++ "\n") $ printCSV $ multiBalanceReportAsCsv ropts r
+            _     -> case baltype of
+              PeriodChange     -> periodChangeReportAsText
+              CumulativeChange -> cumulativeChangeReportAsText
+              HistoricalBalance -> historicalBalanceReportAsText
+      return $ (render ropts report, (tots, tot))
 
 -- single-column balance reports
 
