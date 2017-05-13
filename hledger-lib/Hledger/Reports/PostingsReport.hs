@@ -73,7 +73,7 @@ postingsReport opts q j = (totallabel, items)
           showempty = empty_ opts || average_ opts
 
       -- posting report items ready for display
-      items = dbg1 "postingsReport items" $ postingsReportItems displayps (nullposting,Nothing) whichdate depth startbal runningcalc startnum
+      items = dbg1 "postingsReport items" $ postingsReportItems displayps whichdate depth startbal runningcalc startnum
         where
           historical = balancetype_ opts == HistoricalBalance
           precedingsum = sumPostings precedingps
@@ -138,18 +138,31 @@ matchedPostingsBeforeAndDuring opts q j (DateSpan mstart mend) =
 
 -- | Generate postings report line items from a list of postings or (with
 -- non-Nothing dates attached) summary postings.
-postingsReportItems :: [(Posting,Maybe Day)] -> (Posting,Maybe Day) -> WhichDate -> Int -> MixedAmount -> (Int -> MixedAmount -> MixedAmount -> MixedAmount) -> Int -> [PostingsReportItem]
-postingsReportItems [] _ _ _ _ _ _ = []
-postingsReportItems ((p,menddate):ps) (pprev,menddateprev) wd d b runningcalcfn itemnum = i:(postingsReportItems ps (p,menddate) wd d b' runningcalcfn (itemnum+1))
-    where
-      i = mkpostingsReportItem showdate showdesc wd menddate p' b'
-      (showdate, showdesc) | isJust menddate = (menddate /= menddateprev,        False)
-                           | otherwise       = (isfirstintxn || isdifferentdate, isfirstintxn)
-      isfirstintxn = ptransaction p /= ptransaction pprev
-      isdifferentdate = case wd of PrimaryDate   -> postingDate p  /= postingDate pprev
-                                   SecondaryDate -> postingDate2 p /= postingDate2 pprev
-      p' = p{paccount= clipOrEllipsifyAccountName d $ paccount p}
-      b' = runningcalcfn itemnum b (pamount p)
+postingsReportItems
+    :: [(Posting,Maybe Day)]    -- ^ list of postings
+    -> WhichDate                -- ^ WhichDate
+    -> Int                      -- ^ depth
+    -> MixedAmount              -- ^ running balance
+    -> (Int -> MixedAmount -> MixedAmount -> MixedAmount)   -- ^ running calc function
+    -> Int                      -- ^ item number
+    -> [PostingsReportItem]
+postingsReportItems ps wd depth b0 runningcalcfn i0 =
+      -- basically evalState (traverse (state . flip go) ps) (nullposting, Nothing, b0, i0)
+      snd $ mapAccumL go (nullposting, Nothing, b0, i0) ps
+  where
+    go  :: (Posting, Maybe Day, MixedAmount, Int)
+        -> (Posting, Maybe Day)
+        -> ((Posting, Maybe Day, MixedAmount, Int), PostingsReportItem)
+    go (pprev, menddateprev, b, itemnum) (p, menddate) = ((p, menddate, b', itemnum + 1), i)
+      where
+        i = mkpostingsReportItem showdate showdesc wd menddate p' b'
+        (showdate, showdesc) | isJust menddate = (menddate /= menddateprev,        False)
+                             | otherwise       = (isfirstintxn || isdifferentdate, isfirstintxn)
+        isfirstintxn = ptransaction p /= ptransaction pprev
+        isdifferentdate = case wd of PrimaryDate   -> postingDate p  /= postingDate pprev
+                                     SecondaryDate -> postingDate2 p /= postingDate2 pprev
+        p' = p{paccount= clipOrEllipsifyAccountName depth $ paccount p}
+        b' = runningcalcfn itemnum b (pamount p)
 
 -- | Generate one postings report line item, containing the posting,
 -- the current running balance, and optionally the posting date and/or
