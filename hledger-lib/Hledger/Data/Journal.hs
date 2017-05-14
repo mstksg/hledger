@@ -1,5 +1,5 @@
 {-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE StandaloneDeriving, OverloadedStrings #-}
+{-# LANGUAGE StandaloneDeriving, OverloadedStrings, LambdaCase #-}
 {-|
 
 A 'Journal' is a set of transactions, plus optional related data.  This is
@@ -59,6 +59,7 @@ module Hledger.Data.Journal (
   journalCheckBalanceAssertions,
   journalNumberAndTieTransactions,
   journalUntieTransactions,
+  pricesAsTransactions,
   -- * Tests
   samplejournal,
   tests_Hledger_Data_Journal,
@@ -80,6 +81,7 @@ import Data.Monoid
 import Data.Ord
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Traversable (for)
 import Safe (headMay, headDef)
 import Data.Time.Calendar
 import Data.Tree
@@ -852,6 +854,68 @@ traverseJournalAmounts f j =
     tp   g t  = (\ps  -> t  { tpostings = ps  }) <$> g (tpostings t)
     pamt g p  = (\amt -> p  { pamount   = amt }) <$> g (pamount p)
     maa  g (Mixed as) = Mixed <$> g as
+
+pricesAsTransactions :: Journal -> Journal
+pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
+  where
+    merged :: [Either MarketPrice Transaction]
+    merged    = sortBy (comparing (either mpdate tdate)) $
+                  (Right <$> jtxns j) ++ (Left <$> jmarketprices j)
+    txns :: [Transaction]
+    (_, txns) = mapAccumL go (M.empty, M.empty) merged
+    normalize :: M.Map CommoditySymbol Amount -> Amount -> Amount
+    normalize coms a = case M.lookup (acommodity a) coms of
+      Nothing -> traceShow a $ a
+      Just r  -> r { aquantity = aquantity r * aquantity a
+                   , aprice    = aprice a
+                   }
+    go  :: (M.Map AccountName MixedAmount, M.Map CommoditySymbol Amount)
+        -> Either MarketPrice Transaction
+        -> ((M.Map AccountName MixedAmount, M.Map CommoditySymbol Amount), Transaction)
+    go (accts, coms) = \case
+      Left (MarketPrice d c newAmt) ->
+        let scaling = flip fmap (M.lookup c coms) $ \oldAmt ->
+              aquantity oldAmt / aquantity newAmt
+            (changes, _) = flip M.traverseWithKey accts $ \aname (Mixed abal) ->
+                             fmap Mixed . for abal $ \abalAmt ->
+                if acommodity abalAmt == c
+                  then case scaling of
+                    Nothing -> ([], abalAmt)
+                    Just s  ->
+                      let -- abalAmtNorm = normalize coms abalAmt
+                          newAbal = abalAmt `divideAmount` s
+                          -- change  = normalize coms newAbal - normalize coms abalAmt
+                          -- newPost = (post aname (newAbal - abalAmt))
+                          --              { ptransaction = Just trans
+                          --              }
+                      in  ([(aname, normalize coms $ newAbal - abalAmt)], abalAmt)
+                  else ([], abalAmt)
+            changes' = map (\(n,b) -> (post n b) { ptransaction = Just trans })
+                     . M.toList
+                     $ M.fromListWith (+) changes
+            trans :: Transaction
+            trans = nulltransaction
+              { tdate        = d
+              , tstatus      = Cleared
+              , tdescription = case M.lookup c coms of
+                                 Nothing -> T.pack $ printf "Commodity valued: %s at %s"
+                                              c (showAmount newAmt)
+                                 Just a  -> T.pack $ printf "Commodity revalued: %s from %s to %s"
+                                              c (showAmount a) (showAmount newAmt)
+              , tpostings    = changes'
+              }
+        in  ((accts, M.insert c newAmt coms), trans)
+      Right tr ->
+        let (newAccts, posts) = mapAccumL go' accts (tpostings tr)
+              where
+                go' :: M.Map AccountName MixedAmount
+                    -> Posting
+                    -> (M.Map AccountName MixedAmount, Posting)
+                go' accts' p =
+                  let accts'' = M.insertWith (+) (paccount p) (pamount p) accts'
+                      postAmt = normalize coms . sum . amounts $ pamount p
+                  in  (accts'', p { pamount = Mixed [postAmt], porigin = Just p })
+        in  ((newAccts, coms), tr { tpostings = posts })
 
 -- | The fully specified date span enclosing the dates (primary or secondary)
 -- of all this journal's transactions and postings, or DateSpan Nothing Nothing

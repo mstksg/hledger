@@ -128,13 +128,17 @@ anonymise j
 
 journalApplyValue :: ReportOpts -> Journal -> IO Journal
 journalApplyValue ropts j = do
-    mvaluedate <- reportEndDate j ropts
-    let convert | value_ ropts
-                , Just d <- mvaluedate
-                = overJournalAmounts (amountValue j d)
-                | otherwise
-                = id
+    let convert | value_ ropts = pricesAsTransactions
+                | otherwise    = id
     return $ convert j
+-- journalApplyValue ropts j = do
+--     mvaluedate <- reportEndDate j ropts
+--     let convert | value_ ropts
+--                 , Just d <- mvaluedate
+--                 = overJournalAmounts (amountValue j d)
+--                 | otherwise
+--                 = id
+--     return $ convert j
 
 -- | Write some output to stdout or to a file selected by --output-file.
 writeOutput :: CliOpts -> String -> IO ()
