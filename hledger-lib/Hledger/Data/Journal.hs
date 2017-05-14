@@ -865,7 +865,7 @@ pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
     (_, txns) = mapAccumL go (M.empty, M.empty) merged
     normalize :: M.Map CommoditySymbol Amount -> Amount -> Amount
     normalize coms a = case M.lookup (acommodity a) coms of
-      Nothing -> traceShow a $ a
+      Nothing -> a
       Just r  -> r { aquantity = aquantity r * aquantity a
                    , aprice    = aprice a
                    }
@@ -914,7 +914,7 @@ pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
                 go' accts' p =
                   let accts'' = M.insertWith (+) (paccount p) (pamount p) accts'
                       postAmt = normalize coms . sum . amounts $ pamount p
-                  in  (accts'', p { pamount = Mixed [postAmt], porigin = Just p })
+                  in  (accts'', p { pamount = Mixed [postAmt] })
         in  ((newAccts, coms), tr { tpostings = posts })
 
 -- | The fully specified date span enclosing the dates (primary or secondary)
