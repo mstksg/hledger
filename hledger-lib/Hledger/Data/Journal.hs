@@ -865,16 +865,16 @@ traverseJournalAmounts f j =
 -- showing that the account /lost/ $12 in value (and is now only worth
 -- $24).
 pricesAsTransactions :: Journal -> Journal
-pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
+pricesAsTransactions j = j { jmarketprices = [], jtxns = catMaybes txns }
   where
     merged :: [Either MarketPrice Transaction]
     merged    = sortBy (comparing (either mpdate tdate)) $
-                  (Right <$> jtxns j) ++ (Left <$> jmarketprices j)
-    txns :: [Transaction]
+                  (Left <$> jmarketprices j) ++ (Right <$> jtxns j)
+    txns :: [Maybe Transaction]
     (_, txns) = mapAccumL go (M.empty, M.empty) merged
     go  :: (M.Map AccountName MixedAmount, M.Map CommoditySymbol Amount)
         -> Either MarketPrice Transaction
-        -> ((M.Map AccountName MixedAmount, M.Map CommoditySymbol Amount), Transaction)
+        -> ((M.Map AccountName MixedAmount, M.Map CommoditySymbol Amount), Maybe Transaction)
     go (accts, coms) = \case
       Left (MarketPrice d c newAmt) ->
         let scaling = flip fmap (M.lookup c coms) $ \oldAmt ->
@@ -906,7 +906,7 @@ pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
                                               c (showAmount a) (showAmount newAmt)
               , tpostings    = changes' ++ [squaring]
               }
-        in  ((accts, M.insert c newAmt coms), trans)
+        in  ((accts, M.insert c newAmt coms), trans <$ guard (not (null changes)))
       Right tr ->
         let ((newAccts, discrs), posts) = mapAccumL go' (accts, []) (tpostings tr)
               where
@@ -923,7 +923,7 @@ pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
                         Just d  | not (isZeroAmount d) -> post "commodities:revaluation" d : discrs'
                         Nothing                        -> discrs'
                   in  ((accts'', discrs''), p { pamount = Mixed [postAmt] })
-        in  ((newAccts, coms), tr { tpostings = posts ++ discrs })
+        in  ((newAccts, coms), Just (tr { tpostings = posts ++ discrs }))
     quantitiesAndDiscrep
         :: M.Map CommoditySymbol Amount
         -> Amount
