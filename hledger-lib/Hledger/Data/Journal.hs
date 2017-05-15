@@ -855,6 +855,15 @@ traverseJournalAmounts f j =
     pamt g p  = (\amt -> p  { pamount   = amt }) <$> g (pamount p)
     maa  g (Mixed as) = Mixed <$> g as
 
+-- | Converts all amounts to their values of the default commodities /at
+-- the time of the transaction/ if possible.  Replaces changes in commodity
+-- prices with transactions representing changes in /values/ of balances.
+--
+-- For example, for an account of balance 12 X, with a price of $3 per X,
+-- the account will instead start out at $36.  If, later, the price of
+-- X changes to $2 per X, a transaction will be indicated at that time,
+-- showing that the account /lost/ $12 in value (and is now only worth
+-- $24).
 pricesAsTransactions :: Journal -> Journal
 pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
   where
@@ -863,12 +872,6 @@ pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
                   (Right <$> jtxns j) ++ (Left <$> jmarketprices j)
     txns :: [Transaction]
     (_, txns) = mapAccumL go (M.empty, M.empty) merged
-    normalize :: M.Map CommoditySymbol Amount -> Amount -> Amount
-    normalize coms a = case M.lookup (acommodity a) coms of
-      Nothing -> a
-      Just r  -> r { aquantity = aquantity r * aquantity a
-                   , aprice    = aprice a
-                   }
     go  :: (M.Map AccountName MixedAmount, M.Map CommoditySymbol Amount)
         -> Either MarketPrice Transaction
         -> ((M.Map AccountName MixedAmount, M.Map CommoditySymbol Amount), Transaction)
@@ -882,17 +885,16 @@ pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
                   then case scaling of
                     Nothing -> ([], abalAmt)
                     Just s  ->
-                      let -- abalAmtNorm = normalize coms abalAmt
-                          newAbal = abalAmt `divideAmount` s
-                          -- change  = normalize coms newAbal - normalize coms abalAmt
-                          -- newPost = (post aname (newAbal - abalAmt))
-                          --              { ptransaction = Just trans
-                          --              }
+                      let newAbal = abalAmt `divideAmount` s
                       in  ([(aname, normalize coms $ newAbal - abalAmt)], abalAmt)
                   else ([], abalAmt)
             changes' = map (\(n,b) -> (post n b) { ptransaction = Just trans })
                      . M.toList
                      $ M.fromListWith (+) changes
+            squaring = posting { paccount     = "commodities:revaluation"
+                               , pamount      = - sumPostings changes'
+                               , ptransaction = Just trans
+                               }
             trans :: Transaction
             trans = nulltransaction
               { tdate        = d
@@ -902,20 +904,43 @@ pricesAsTransactions j = j { jmarketprices = [], jtxns = txns }
                                               c (showAmount newAmt)
                                  Just a  -> T.pack $ printf "Commodity revalued: %s from %s to %s"
                                               c (showAmount a) (showAmount newAmt)
-              , tpostings    = changes'
+              , tpostings    = changes' ++ [squaring]
               }
         in  ((accts, M.insert c newAmt coms), trans)
       Right tr ->
-        let (newAccts, posts) = mapAccumL go' accts (tpostings tr)
+        let ((newAccts, discrs), posts) = mapAccumL go' (accts, []) (tpostings tr)
               where
-                go' :: M.Map AccountName MixedAmount
+                go' :: (M.Map AccountName MixedAmount, [Posting])
                     -> Posting
-                    -> (M.Map AccountName MixedAmount, Posting)
-                go' accts' p =
+                    -> ((M.Map AccountName MixedAmount, [Posting]), Posting)
+                go' (accts', discrs') p =
                   let accts'' = M.insertWith (+) (paccount p) (pamount p) accts'
-                      postAmt = normalize coms . sum . amounts $ pamount p
-                  in  (accts'', p { pamount = Mixed [postAmt] })
-        in  ((newAccts, coms), tr { tpostings = posts })
+                      (postAmts, postDiscreps)
+                              = unzip . map (quantitiesAndDiscrep coms) . amounts $ pamount p
+                      postAmt     = sum postAmts
+                      postDiscrep = fmap getSum . foldMap (fmap (Sum . normalize coms)) $ postDiscreps
+                      discrs'' = case postDiscrep of
+                        Just d  | not (isZeroAmount d) -> post "commodities:revaluation" d : discrs'
+                        Nothing                        -> discrs'
+                  in  ((accts'', discrs''), p { pamount = Mixed [postAmt] })
+        in  ((newAccts, coms), tr { tpostings = posts ++ discrs })
+    quantitiesAndDiscrep
+        :: M.Map CommoditySymbol Amount
+        -> Amount
+        -> (Amount, Maybe Amount)
+    quantitiesAndDiscrep coms a = (a', p)
+      where
+        a' = normalize coms a
+        p = case aprice a of
+              NoPrice      -> Nothing
+              UnitPrice u  -> Nothing
+              TotalPrice t -> Just (t - a')
+    normalize :: M.Map CommoditySymbol Amount -> Amount -> Amount
+    normalize coms a = case M.lookup (acommodity a) coms of
+      Nothing -> a
+      Just r  -> r { aquantity = aquantity r * aquantity a
+                   , aprice    = aprice a
+                   }
 
 -- | The fully specified date span enclosing the dates (primary or secondary)
 -- of all this journal's transactions and postings, or DateSpan Nothing Nothing
